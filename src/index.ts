@@ -32,6 +32,18 @@ const GenericNameParamsSchema = z.object({
   generic_name: z.string(),
 });
 
+const AEPipelineRAGParamsSchema = z.object({
+  query: z.string().optional(),
+  drug: z.string().optional(),
+  condition: z.string().optional(),
+  filters: z.object({
+    limit: z.number().optional(),
+  }).optional(),
+  top_k: z.number().optional(),
+});
+
+type AEPipelineRAGParams = z.infer<typeof AEPipelineRAGParamsSchema>;
+
 // RxNav API response interfaces
 interface DrugInfo {
   rxcui: string;
