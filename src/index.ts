@@ -9,6 +9,14 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import {
+  chunkText,
+  rankAndPickTop,
+  summarizeChunks,
+  extractCitations,
+  TextChunk,
+  RAGResult
+} from "./rag-utils.js";
 
 // RxNav API parameter schemas
 const DrugSearchParamsSchema = z.object({
@@ -160,6 +168,47 @@ class RxNavServer {
           }
         },
         {
+          name: "ae_pipeline_rag",
+          description: "Advanced RAG pipeline for drug terminology analysis. Fetches, extracts, chunks, retrieves and summarizes RxNav drug terminology data in one call to prevent LLM response truncation.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "Natural language query about drug terminology. Example: 'ATC classification and generic names'"
+              },
+              drug: {
+                type: "string",
+                description: "Drug name to focus the analysis on. Example: 'aspirin', 'metformin'"
+              },
+              condition: {
+                type: "string",
+                description: "Medical condition context for drug classification. Example: 'diabetes', 'cardiovascular'"
+              },
+              top_k: {
+                type: "number",
+                description: "Number of most relevant text chunks to return (1-10)",
+                default: 5,
+                minimum: 1,
+                maximum: 10
+              },
+              filters: {
+                type: "object",
+                description: "Additional filters for data retrieval",
+                properties: {
+                  limit: {
+                    type: "number",
+                    description: "Maximum drug records to fetch",
+                    default: 50,
+                    minimum: 1,
+                    maximum: 100
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
           name: "get_drug_ingredients",
           description: "Get active ingredients for a given drug name or RxCUI. Returns ingredient information including strength and dosage form details.",
           inputSchema: {
@@ -224,6 +273,10 @@ class RxNavServer {
             const atcParams = DrugIdentifierParamsSchema.parse(args);
             this.validateDrugIdentifier(atcParams.drug_identifier);
             return await this.getATCClassification(atcParams.drug_identifier);
+          
+          case "ae_pipeline_rag":
+            const ragParams = AEPipelineRAGParamsSchema.parse(args);
+            return await this.aePipelineRag(ragParams);
           
           case "get_drug_ingredients":
             const ingredientParams = DrugIdentifierParamsSchema.parse(args);
@@ -949,6 +1002,260 @@ class RxNavServer {
         `Failed to search for drug "${drugName}": ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
+
+  private async aePipelineRag(params: AEPipelineRAGParams): Promise<{ content: Array<{ type: string; text: string }> }> {
+    try {
+      // 1. 确定要执行的查询类型和参数
+      const drugName = params.drug || params.query;
+      if (!drugName) {
+        const result: RAGResult = {
+          source: "rxnav",
+          query: params.query,
+          drug: params.drug,
+          condition: params.condition,
+          top_chunks: [],
+          summary: "请提供药物名称或具体查询以获取 RxNav 术语信息。",
+          citations: []
+        };
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }]
+        };
+      }
+
+      // 2. 收集多种类型的药物信息
+      const allData: Array<{ type: string; data: any }> = [];
+      
+      try {
+        // 搜索基本药物信息
+        const searchResult = await this.searchDrugByName(drugName, Math.min(params.filters?.limit || 20, 20));
+        allData.push({ type: 'search', data: searchResult });
+      } catch (error) {
+        this.log('warn', 'Failed to search drug by name', { drugName, error });
+      }
+      
+      try {
+        // 获取通用名
+        const genericResult = await this.getGenericName(drugName);
+        allData.push({ type: 'generic', data: genericResult });
+      } catch (error) {
+        this.log('warn', 'Failed to get generic name', { drugName, error });
+      }
+      
+      try {
+        // 获取品牌名（如果输入的是通用名）
+        const brandResult = await this.getBrandNames(drugName);
+        allData.push({ type: 'brand', data: brandResult });
+      } catch (error) {
+        this.log('warn', 'Failed to get brand names', { drugName, error });
+      }
+      
+      try {
+        // 获取 ATC 分类
+        const atcResult = await this.getATCClassification(drugName);
+        allData.push({ type: 'atc', data: atcResult });
+      } catch (error) {
+        this.log('warn', 'Failed to get ATC classification', { drugName, error });
+      }
+      
+      try {
+        // 获取成分信息
+        const ingredientsResult = await this.getDrugIngredients(drugName);
+        allData.push({ type: 'ingredients', data: ingredientsResult });
+      } catch (error) {
+        this.log('warn', 'Failed to get drug ingredients', { drugName, error });
+      }
+
+      if (allData.length === 0) {
+        const result: RAGResult = {
+          source: "rxnav",
+          query: params.query,
+          drug: params.drug,
+          condition: params.condition,
+          top_chunks: [],
+          summary: `未找到药物 "${drugName}" 的相关信息。请检查药物名称拼写或尝试其他名称。`,
+          citations: []
+        };
+        
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }]
+        };
+      }
+
+      // 3. 提取和分块文本
+      const allChunks: TextChunk[] = [];
+      
+      for (const item of allData) {
+        const itemText = this.extractRxNavText(item);
+        if (itemText.trim().length > 0) {
+          const sourceId = `${item.type}_${Math.random().toString(36).substr(2, 9)}`;
+          
+          const chunks = chunkText(
+            itemText,
+            800,  // RxNav 数据通常较短，使用较小的块
+            150,
+            sourceId,
+            {
+              type: item.type,
+              drugName: drugName,
+              hasRxCUI: itemText.includes('rxcui'),
+              hasATC: itemText.includes('ATC') || /[A-Z]\d{2}[A-Z]{2}\d{2}/.test(itemText)
+            }
+          );
+          
+          allChunks.push(...chunks);
+        }
+      }
+
+      // 4. 构建查询关键词
+      const queryText = [params.query, params.drug, params.condition]
+        .filter(Boolean)
+        .join(' ');
+      
+      const extraKeywords = [
+        'rxcui', 'atc', 'generic', 'brand', 'ingredient', 'classification',
+        'therapeutic', 'anatomical', 'chemical', 'substance',
+        '通用名', '商品名', '成分', '分类', '治疗'
+      ];
+
+      // 5. 检索和排序
+      const topChunks = rankAndPickTop(
+        allChunks,
+        queryText,
+        params.top_k,
+        extraKeywords
+      );
+
+      // 6. 生成摘要
+      const summary = summarizeChunks(topChunks, {
+        source: 'rxnav',
+        query: params.query,
+        drug: params.drug,
+        condition: params.condition,
+        maxLength: 1200
+      });
+
+      // 7. 提取引用
+      const citations = extractCitations(topChunks);
+
+      // 8. 构建结果
+      const result: RAGResult = {
+        source: "rxnav",
+        query: params.query,
+        drug: params.drug,
+        condition: params.condition,
+        top_chunks: topChunks.map(chunk => ({
+          ...chunk,
+          text: chunk.text.length > 1000 ? chunk.text.slice(0, 1000) + '...' : chunk.text
+        })),
+        summary,
+        citations
+      };
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+      
+    } catch (error) {
+      this.log('error', 'Error in ae_pipeline_rag', { error });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `RAG pipeline failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  private extractRxNavText(item: { type: string; data: any }): string {
+    const textParts: string[] = [];
+    
+    try {
+      // 解析返回的内容
+      const content = item.data?.content?.[0]?.text;
+      if (!content) return '';
+      
+      let parsedData;
+      try {
+        parsedData = JSON.parse(content);
+      } catch {
+        return content; // 如果不是 JSON，直接返回文本
+      }
+      
+      textParts.push(`=== ${item.type.toUpperCase()} INFORMATION ===`);
+      
+      switch (item.type) {
+        case 'search':
+          if (parsedData.results && Array.isArray(parsedData.results)) {
+            textParts.push(`Query: ${parsedData.query}`);
+            textParts.push(`Total Found: ${parsedData.total_found}`);
+            parsedData.results.forEach((result: any, idx: number) => {
+              textParts.push(`${idx + 1}. RxCUI: ${result.rxcui}, Name: ${result.name}, Type: ${result.termType}`);
+            });
+          }
+          break;
+          
+        case 'generic':
+          if (parsedData.generic_names && Array.isArray(parsedData.generic_names)) {
+            textParts.push(`Query: ${parsedData.query}`);
+            textParts.push(`RxCUI: ${parsedData.rxcui}`);
+            parsedData.generic_names.forEach((generic: any, idx: number) => {
+              textParts.push(`${idx + 1}. Generic Name: ${generic.name}, RxCUI: ${generic.rxcui}, Type: ${generic.termType}`);
+            });
+          }
+          break;
+          
+        case 'brand':
+          if (parsedData.brand_names && Array.isArray(parsedData.brand_names)) {
+            textParts.push(`Query: ${parsedData.query}`);
+            textParts.push(`Generic RxCUI: ${parsedData.generic_rxcui}`);
+            parsedData.brand_names.forEach((brand: any, idx: number) => {
+              textParts.push(`${idx + 1}. Brand Name: ${brand.name}, RxCUI: ${brand.rxcui}, Type: ${brand.termType}`);
+            });
+          }
+          break;
+          
+        case 'atc':
+          if (parsedData.atc_codes && Array.isArray(parsedData.atc_codes)) {
+            textParts.push(`Query: ${parsedData.query}`);
+            textParts.push(`RxCUI: ${parsedData.rxcui}`);
+            parsedData.atc_codes.forEach((atc: any, idx: number) => {
+              textParts.push(`${idx + 1}. ATC Code: ${atc.code}, Level: ${atc.level}, Description: ${atc.name}`);
+            });
+          }
+          break;
+          
+        case 'ingredients':
+          if (parsedData.ingredients && Array.isArray(parsedData.ingredients)) {
+            textParts.push(`Query: ${parsedData.query}`);
+            textParts.push(`RxCUI: ${parsedData.rxcui}`);
+            parsedData.ingredients.forEach((ingredient: any, idx: number) => {
+              textParts.push(`${idx + 1}. Ingredient: ${ingredient.name}, RxCUI: ${ingredient.rxcui}, Type: ${ingredient.termType}`);
+              if (ingredient.strength) textParts.push(`   Strength: ${ingredient.strength}`);
+              if (ingredient.dosageForm) textParts.push(`   Dosage Form: ${ingredient.dosageForm}`);
+            });
+          }
+          break;
+          
+        default:
+          // 通用处理：将对象转换为可读文本
+          textParts.push(JSON.stringify(parsedData, null, 2));
+      }
+      
+    } catch (error) {
+      this.log('warn', 'Failed to extract RxNav text', { type: item.type, error });
+      return `Error processing ${item.type} data: ${error}`;
+    }
+    
+    return textParts.join('\n\n');
   }
 
   async run() {

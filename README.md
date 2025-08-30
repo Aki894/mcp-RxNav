@@ -253,34 +253,155 @@ docker run -d -p 3000:3000 --name mcp-openfda-server mcp-openfda
 }
 ```
 
+## 测试和示例
+
+### 运行集成测试
+
+```bash
+# 构建项目
+npm run build
+
+# 运行集成测试
+node test/integration.test.js
+```
+
+### 运行使用示例
+
+```bash
+# 运行使用示例
+node examples/usage-examples.js
+```
+
 ## API使用示例
+
+### 1. 药物名称搜索
 
 ```javascript
 // 搜索阿司匹林的信息
-await search_drug_by_name({
+const result = await search_drug_by_name({
   drug_name: "aspirin",
   limit: 5
 });
 
+// 返回结果示例:
+{
+  "query": "aspirin",
+  "drugs": [
+    {
+      "rxcui": "1191",
+      "name": "Aspirin",
+      "termType": "IN"
+    },
+    {
+      "rxcui": "243670",
+      "name": "Aspirin 325 MG Oral Tablet",
+      "termType": "SCD"
+    }
+  ],
+  "total_found": 2
+}
+```
+
+### 2. 通用名转换
+
+```javascript
 // 获取Advil的通用名
-await get_generic_name({
+const result = await get_generic_name({
   drug_identifier: "Advil"
 });
 
+// 返回结果示例:
+{
+  "query": "Advil",
+  "rxcui": "5640",
+  "generic_names": [
+    {
+      "rxcui": "5640",
+      "name": "ibuprofen",
+      "termType": "IN"
+    }
+  ],
+  "total_found": 1
+}
+```
+
+### 3. 商品名查询
+
+```javascript
 // 查询布洛芬的商品名
-await get_brand_names({
+const result = await get_brand_names({
   generic_name: "ibuprofen"
 });
 
+// 返回结果示例:
+{
+  "query": "ibuprofen",
+  "generic_rxcui": "5640",
+  "brand_names": [
+    {
+      "rxcui": "209387",
+      "name": "Advil",
+      "termType": "BN"
+    },
+    {
+      "rxcui": "209459",
+      "name": "Motrin",
+      "termType": "BN"
+    }
+  ],
+  "total_found": 2
+}
+```
+
+### 4. ATC分类查询
+
+```javascript
 // 获取阿司匹林的ATC分类
-await get_atc_classification({
+const result = await get_atc_classification({
   drug_identifier: "aspirin"
 });
 
+// 返回结果示例:
+{
+  "query": "aspirin",
+  "rxcui": "1191",
+  "atc_codes": [
+    {
+      "code": "N02BA01",
+      "level": 5,
+      "name": "Chemical substance"
+    },
+    {
+      "code": "B01AC06",
+      "level": 5,
+      "name": "Chemical substance"
+    }
+  ],
+  "total_found": 2
+}
+```
+
+### 5. 药物成分查询
+
+```javascript
 // 查询泰诺的活性成分
-await get_drug_ingredients({
+const result = await get_drug_ingredients({
   drug_identifier: "Tylenol"
 });
+
+// 返回结果示例:
+{
+  "query": "Tylenol",
+  "rxcui": "202433",
+  "ingredients": [
+    {
+      "rxcui": "161",
+      "name": "acetaminophen",
+      "termType": "IN"
+    }
+  ],
+  "total_found": 1
+}
 ```
 
 ## 环境变量
