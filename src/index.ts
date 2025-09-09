@@ -24,6 +24,11 @@ const GenericNameParamsSchema = z.object({
   generic_name: z.string(),
 });
 
+const DrugDetailParamsSchema = z.object({
+  rxcui: z.string(),
+  fields: z.array(z.string()).optional(),
+});
+
 // RxNav API response interfaces
 interface DrugInfo {
   rxcui: string;
@@ -172,6 +177,28 @@ class RxNavServer {
             },
             required: ["drug_identifier"]
           }
+        },
+        {
+          name: "get_complete_drug_details",
+          description: "Get complete, untruncated information for a specific drug using its RxCUI. Use this when you need full drug details.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              rxcui: {
+                type: "string",
+                description: "RxCUI of the drug (obtained from search results)"
+              },
+              fields: {
+                type: "array",
+                items: {
+                  type: "string"
+                },
+                description: "Optional: Specific information to return. Available: generic_names, brand_names, atc_codes, ingredients, properties",
+                default: []
+              }
+            },
+            required: ["rxcui"]
+          }
         }
       ],
     }));
@@ -229,6 +256,11 @@ class RxNavServer {
             const ingredientParams = DrugIdentifierParamsSchema.parse(args);
             this.validateDrugIdentifier(ingredientParams.drug_identifier);
             return await this.getDrugIngredients(ingredientParams.drug_identifier);
+          
+          case "get_complete_drug_details":
+            const detailParams = DrugDetailParamsSchema.parse(args);
+            this.validateDrugIdentifier(detailParams.rxcui);
+            return await this.getCompleteDrugDetails(detailParams.rxcui, detailParams.fields);
           
           default:
             this.log('error', `Unknown tool requested: ${name}`);
@@ -374,6 +406,27 @@ class RxNavServer {
     } else if (this.enableLogging) {
       console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`, data || '');
     }
+  }
+
+  // Helper method to truncate long text
+  private truncateText(text: string | string[], maxLength: number = 300): string {
+    if (!text) return "";
+    
+    const textStr = Array.isArray(text) ? text.join(", ") : text;
+    if (textStr.length <= maxLength) return textStr;
+    
+    return textStr.substring(0, maxLength) + "... [truncated]";
+  }
+
+  // Extract only key information from drug data
+  private extractKeyDrugInfo(drugInfo: any) {
+    return {
+      rxcui: drugInfo.rxcui || "Unknown",
+      name: this.truncateText(drugInfo.name, 100),
+      term_type: drugInfo.termType || drugInfo.tty || "Unknown",
+      // Keep essential identifiers for getting full details
+      has_additional_info: true
+    };
   }
 
   private validateDrugIdentifier(identifier: string): void {
@@ -882,6 +935,117 @@ class RxNavServer {
     }
   }
 
+  private async getCompleteDrugDetails(rxcui: string, fields?: string[]) {
+    try {
+      const detailsData: any = {
+        rxcui: rxcui,
+        basic_info: {},
+        generic_names: [],
+        brand_names: [],
+        atc_codes: [],
+        ingredients: [],
+        properties: {}
+      };
+
+      if (!fields || fields.length === 0 || fields.includes('basic_info')) {
+        // Get basic drug information
+        const propsEndpoint = `/rxcui/${rxcui}/allProperties.json?prop=all`;
+        try {
+          const propsData = await this.makeRxNavRequest(propsEndpoint);
+          if (propsData.propConceptGroup && propsData.propConceptGroup.propConcept) {
+            detailsData.properties = propsData.propConceptGroup.propConcept;
+          }
+        } catch (error) {
+          console.log(`Failed to get properties for ${rxcui}: ${error}`);
+        }
+      }
+
+      if (!fields || fields.length === 0 || fields.includes('generic_names')) {
+        // Get generic names
+        const relatedEndpoint = `/rxcui/${rxcui}/related.json?tty=IN+PIN`;
+        try {
+          const relatedData = await this.makeRxNavRequest(relatedEndpoint);
+          if (relatedData.relatedGroup && relatedData.relatedGroup.conceptGroup) {
+            for (const group of relatedData.relatedGroup.conceptGroup) {
+              if (group.conceptProperties) {
+                detailsData.generic_names.push(...group.conceptProperties);
+              }
+            }
+          }
+        } catch (error) {
+          console.log(`Failed to get generic names for ${rxcui}: ${error}`);
+        }
+      }
+
+      if (!fields || fields.length === 0 || fields.includes('brand_names')) {
+        // Get brand names
+        const brandEndpoint = `/rxcui/${rxcui}/related.json?tty=SBD+BPCK+BN`;
+        try {
+          const brandData = await this.makeRxNavRequest(brandEndpoint);
+          if (brandData.relatedGroup && brandData.relatedGroup.conceptGroup) {
+            for (const group of brandData.relatedGroup.conceptGroup) {
+              if (group.conceptProperties) {
+                detailsData.brand_names.push(...group.conceptProperties);
+              }
+            }
+          }
+        } catch (error) {
+          console.log(`Failed to get brand names for ${rxcui}: ${error}`);
+        }
+      }
+
+      if (!fields || fields.length === 0 || fields.includes('atc_codes')) {
+        // Get ATC codes
+        const atcEndpoint = `/rxcui/${rxcui}/property.json?propName=ATC`;
+        try {
+          const atcData = await this.makeRxNavRequest(atcEndpoint);
+          if (atcData.propConceptGroup && atcData.propConceptGroup.propConcept) {
+            detailsData.atc_codes = atcData.propConceptGroup.propConcept;
+          }
+        } catch (error) {
+          console.log(`Failed to get ATC codes for ${rxcui}: ${error}`);
+        }
+      }
+
+      if (!fields || fields.length === 0 || fields.includes('ingredients')) {
+        // Get ingredients
+        const ingredientEndpoint = `/rxcui/${rxcui}/related.json?tty=IN+PIN`;
+        try {
+          const ingredientData = await this.makeRxNavRequest(ingredientEndpoint);
+          if (ingredientData.relatedGroup && ingredientData.relatedGroup.conceptGroup) {
+            for (const group of ingredientData.relatedGroup.conceptGroup) {
+              if (group.conceptProperties) {
+                detailsData.ingredients.push(...group.conceptProperties);
+              }
+            }
+          }
+        } catch (error) {
+          console.log(`Failed to get ingredients for ${rxcui}: ${error}`);
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              rxcui: rxcui,
+              complete_drug_details: detailsData,
+              note: "This is the complete, untruncated information for this drug."
+            }, null, 2)
+          }
+        ]
+      };
+
+    } catch (error) {
+      console.error("Error getting complete drug details:", error);
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get complete details for RxCUI "${rxcui}": ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   private async searchDrugByName(drugName: string, limit: number) {
     try {
       // Use RxNav drugs API to search for drug by name
@@ -903,30 +1067,23 @@ class RxNavServer {
         };
       }
 
-      // Process and format the results
-      const results: DrugInfo[] = [];
+      // Process and format the results with summarization
+      const results: any[] = [];
       
       for (const group of data.drugGroup.conceptGroup) {
         if (group.conceptProperties) {
           for (const concept of group.conceptProperties.slice(0, limit)) {
-            const drugInfo: DrugInfo = {
+            const summarizedDrug = this.extractKeyDrugInfo({
               rxcui: concept.rxcui,
               name: concept.name,
               termType: concept.tty || group.tty,
-            };
+              synonym: concept.synonym
+            });
             
-            // Add synonym if available
-            if (concept.synonym) {
-              drugInfo.name = `${concept.name} (${concept.synonym})`;
-            }
-            
-            results.push(drugInfo);
+            results.push(summarizedDrug);
           }
         }
       }
-
-      // Limit results to requested number
-      const limitedResults = results.slice(0, limit);
 
       return {
         content: [
@@ -935,8 +1092,9 @@ class RxNavServer {
             text: JSON.stringify({
               query: drugName,
               total_found: results.length,
-              returned_count: limitedResults.length,
-              results: limitedResults
+              returned_count: results.length,
+              results: results,
+              note: "Drug information has been summarized. Use get_complete_drug_details with rxcui for full information."
             }, null, 2)
           }
         ]
