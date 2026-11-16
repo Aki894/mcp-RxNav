@@ -1,49 +1,52 @@
 {
   "name": "mcp-rxnav",
-  "version": "0.1.1",
-  "description": "MCP server for RxNav API - enables AI agents to query RxNorm drug terminology and standardization",
+  "version": "2.0.0",
+  "description": "TypeScript MCP server for RxNorm drug search, generic and brand names, ATC classifications, ingredients, and complete concept details.",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run clean && tsc",
     "start": "node dist/index.js",
-    "start:http": "node dist/http.js",
     "dev": "tsx src/index.ts",
-    "dev:http": "tsx src/http.ts",
-    "clean": "rm -rf dist"
+    "clean": "node -e \"import('node:fs').then(fs=>fs.rmSync('dist',{recursive:true,force:true}))\"",
+    "prepack": "npm run build"
   },
   "keywords": [
     "mcp",
+    "model-context-protocol",
     "rxnav",
     "rxnorm",
-    "drug",
-    "terminology",
-    "standardization",
-    "api",
-    "medical",
-    "pharmaceutical"
+    "drug-terminology",
+    "drug-safety"
   ],
   "author": "Aki894",
   "license": "GPL-3.0",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.2.0",
-    "zod": "^3.22.0",
-    "dotenv": "^16.0.0",
-    "express": "^4.18.0",
-    "cors": "^2.8.5"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/express": "^4.17.0",
-    "@types/cors": "^2.8.0",
-    "tsx": "^4.0.0",
-    "typescript": "^5.0.0",
-    "ts-node": "^10.0.0"
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
   },
   "bin": {
     "mcp-rxnav": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "README.en.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aki894/mcp-RxNav.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Aki894/mcp-RxNav/issues"
   }
 }
